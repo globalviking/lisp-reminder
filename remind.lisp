@@ -1,59 +1,139 @@
-(require :uiop)
+;;;; remind.lisp
+;;;; SBCL + Termux scheduler (no ASDF/UIOP)
 
-;; CONFIG: Absolute paths to ensure stability
-(defparameter *todo-path* (merge-pathnames "storage/shared/Documents/code/lisp-code/todo.txt"
-                   (user-homedir-pathname)))
+(in-package :cl-user)
 
-(defparameter *snooze-script* (merge-pathnames "storage/shared/Documents/code/lisp-code/snooze.lisp"
-                   (user-homedir-pathname)))
+;; ------------------------------------------------------------
+;; CONFIG: Exact Termux shared-storage paths
+;; ------------------------------------------------------------
 
-(defun current-time-string ()
-  (multiple-value-bind (s m h) (get-decoded-time)
-    (declare (ignore s))
-    (format nil "~2,'0d:~2,'0d" h m)))
+(defparameter *todo-path*
+  #p"~/storage/shared/Documents/code/lisp-code/todo.txt")
+
+(defparameter *snooze-script*
+  #p"~/storage/shared/Documents/code/lisp-code/snooze.lisp")
+
+;; Maps Lisp's day number (0=Mon, 6=Sun) to a 3-letter string
+(defparameter *day-map*
+  '("MON" "TUE" "WED" "THU" "FRI" "SAT" "SUN"))
+
+;; ------------------------------------------------------------
+;; Utilities
+;; ------------------------------------------------------------
+
+(defun read-file-lines (path)
+  (with-open-file (in path :direction :input)
+    (loop for line = (read-line in nil nil)
+          while line
+          collect line)))
+
+(defun trim-line (s)
+  (string-trim '(#\Space #\Tab #\Return #\Newline) s))
+
+(defun run-termux-notification (args)
+  ;; If PATH is flaky, replace "termux-notification" with:
+  ;; "/data/data/com.termux/files/usr/bin/termux-notification"
+  (sb-ext:run-program "termux-notification" args
+                      :search t
+                      :wait t
+                      :output *standard-output*
+                      :error *error-output*))
+
+;; ------------------------------------------------------------
+;; TIME
+;; ------------------------------------------------------------
+
+(defun current-time-details ()
+  "Returns three values: DOW string (MON), Hour (19), Minute (30)."
+  (multiple-value-bind (s m h day-of-month month year day-of-week)
+      (get-decoded-time)
+    (declare (ignore s day-of-month month year))
+    (values (nth day-of-week *day-map*) h m)))
+
+(defun current-time-string (h m)
+  "Formats hour and minute into a string like 'HH:MM'."
+  (format nil "~2,'0d:~2,'0d" h m))
+
+;; ------------------------------------------------------------
+;; ALERT
+;; ------------------------------------------------------------
 
 (defun send-alert (message)
-  (format t "[ALARM] ~a~%" message)
-  
-  ;; The Command: sbcl --script /path/to/snooze.lisp "Task Name"
-  (let ((snooze-cmd (format nil "sbcl --script ~a \"~a\"" *snooze-script* message)))
+  (let ((msg (trim-line message)))
+    (when (> (length msg) 0)
+      (format t "~%[ALARM] ~a~%" msg)
+      (force-output)
+      (let ((snooze-cmd (format nil "sbcl --script ~a \"~a\""
+                                (namestring *snooze-script*)
+                                msg)))
+        (run-termux-notification
+         (list "--title" "Task Reminder"
+               "--content" msg
+               "--id" "lisp-scheduler"
+               "--priority" "high"
+               "--sound"
+               "--button1" "Snooze 5m"
+               "--button1-action" snooze-cmd))))))
 
-    (uiop:run-program (list "termux-notification"
-                            "--title" "Task Reminder"
-                            "--content" message
-                            "--id" "lisp-scheduler"
-                            "--priority" "high"
-                            "--sound"
-                            ;; THE BUTTON
-                            "--button1" "Snooze 5m"
-                            "--button1-action" snooze-cmd)
-                      :ignore-error-status t)))
+;; ------------------------------------------------------------
+;; PARSING & CHECKING
+;; Supported lines:
+;;   "MON 09:30 message"
+;;   "09:30 message"
+;; Blank lines and lines starting with ";" are ignored.
+;; ------------------------------------------------------------
 
 (defun check-tasks ()
-  (let ((now (current-time-string)))
-    ;; Heartbeat (prints a dot so you know it's running)
-    (format t ".") 
-    (force-output)
-    
-    (if (probe-file *todo-path*)
-        (let ((lines (uiop:read-file-lines *todo-path*)))
-          (dolist (line lines)
-            ;; Parse lines like "00:00 Task"
-            ;; Check length > 6 and ensure the 3rd char (index 2) is a colon
-            (when (and (> (length line) 6) 
-                       (char= (char line 2) #\:))
-              (let ((task-time (subseq line 0 5))
-                    (task-msg  (subseq line 6)))
-                ;; If time matches, fire alert
-                (when (string= task-time now)
-                  (send-alert task-msg))))))
-        (format t "[Error] File not found: ~a~%" *todo-path*))))
+  (multiple-value-bind (dow h m) (current-time-details)
+    (let ((now-time-str (current-time-string h m)))
+      (format t ".") ; heartbeat
+      (force-output)
+
+      (if (probe-file *todo-path*)
+          (let ((lines (read-file-lines *todo-path*)))
+            (dolist (raw lines)
+              (let ((line (trim-line raw)))
+                (unless (or (= (length line) 0)
+                            (char= (char line 0) #\;))
+                  (handler-case
+                      (cond
+                        ;; 1) DOW HH:MM message
+                        ((and (>= (length line) 9)
+                              (char= (char line 3) #\Space)
+                              (char= (char line 6) #\:))
+                         (let* ((task-dow  (subseq line 0 3))
+                                (task-time (subseq line 4 9))
+                                (task-msg  (if (> (length line) 10)
+                                               (subseq line 10)
+                                               "")))
+                           (when (and (string= task-dow dow)
+                                      (string= task-time now-time-str))
+                             (send-alert task-msg))))
+
+                        ;; 2) HH:MM message (daily)
+                        ((and (>= (length line) 5)
+                              (char= (char line 2) #\:))
+                         (let* ((task-time (subseq line 0 5))
+                                (task-msg  (if (> (length line) 6)
+                                               (subseq line 6)
+                                               "")))
+                           (when (string= task-time now-time-str)
+                             (send-alert task-msg)))))
+                    (error (c)
+                      (format t "~%[ERROR PARSING] Line: ~s. Error: ~a~%"
+                              raw c)
+                      nil))))))
+          (format t "~%[Error] File not found: ~a~%" *todo-path*)))))
+
 
 (defun main ()
-  (format t "Scheduler Started. (Ctrl+C to stop)~%")
+  (format t "Scheduler Started (DOW aware). (Ctrl+C to stop)~%")
+  (format t "Todo file: ~a~%" *todo-path*)
+  (format t "Snooze script: ~a~%" *snooze-script*)
+  (force-output)
   (loop
     (check-tasks)
-    ;; Wait 60 seconds so we don't spam notifications
-    (sleep 60)))
+    ;; Polling faster reduces the chance of missing the exact minute
+    (sleep 20)))
 
 (main)
