@@ -1,0 +1,10 @@
+# Ignore my personal tasks
+todo.txt
+
+# Ignore Lisp compiled files
+*.fasl
+*.lib
+*.dx64fsl
+
+# Ignore system junk
+.DS_Store
