@@ -17,5 +17,8 @@ A lightweight, hackable notification scheduler written in Common Lisp, designed 
 ## Usage
 1. Set up wake lock in Termux. 
    Run `termux-wake-lock` in Termux to run reliably in the background.
-2. Run the script. 
+2. Create a file todo.txt in the same directory as the other files and input your tasks using the following format:
+7:00 Exercise
+21:00 Sleep
+4. Run the script. 
   `sbcl --script remind.list`
