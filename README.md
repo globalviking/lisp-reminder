@@ -38,7 +38,9 @@ Usage
 
    (This must be in the same directory as `remind.lisp` and `snooze.lisp`).
  * Input your tasks using the format HH:MM Task Name (24-hour time):
+
 07:00 Exercise
+
 21:00 Sleep
 
  * Run the script.
