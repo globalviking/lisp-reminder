@@ -1,5 +1,6 @@
 ;;;; remind.lisp
 ;;;; SBCL + Termux scheduler (no ASDF/UIOP)
+;;;; Checks effectively once per minute and deduplicates alerts.
 
 (in-package :cl-user)
 
@@ -16,6 +17,13 @@
 ;; Maps Lisp's day number (0=Mon, 6=Sun) to a 3-letter string
 (defparameter *day-map*
   '("MON" "TUE" "WED" "THU" "FRI" "SAT" "SUN"))
+
+;; ------------------------------------------------------------
+;; Dedup guard
+;; Stores a key like "MON 09:30"
+;; ------------------------------------------------------------
+
+(defparameter *last-alert-key* nil)
 
 ;; ------------------------------------------------------------
 ;; Utilities
@@ -54,6 +62,9 @@
   "Formats hour and minute into a string like 'HH:MM'."
   (format nil "~2,'0d:~2,'0d" h m))
 
+(defun current-minute-key (dow h m)
+  (format nil "~a ~a" dow (current-time-string h m)))
+
 ;; ------------------------------------------------------------
 ;; ALERT
 ;; ------------------------------------------------------------
@@ -72,6 +83,7 @@
                "--id" "lisp-scheduler"
                "--priority" "high"
                "--sound"
+               "--icon" "done"
                "--button1" "Snooze 5m"
                "--button1-action" snooze-cmd))))))
 
@@ -85,9 +97,15 @@
 
 (defun check-tasks ()
   (multiple-value-bind (dow h m) (current-time-details)
-    (let ((now-time-str (current-time-string h m)))
+    (let* ((now-time-str (current-time-string h m))
+           (minute-key (current-minute-key dow h m)))
       (format t ".") ; heartbeat
       (force-output)
+
+      ;; Safety: prevent multiple alerts within the same minute
+      (when (string= minute-key *last-alert-key*)
+        (return-from check-tasks nil))
+      (setf *last-alert-key* minute-key)
 
       (if (probe-file *todo-path*)
           (let ((lines (read-file-lines *todo-path*)))
@@ -98,6 +116,7 @@
                   (handler-case
                       (cond
                         ;; 1) DOW HH:MM message
+                        ;; Example: "MON 09:30 Pay rent"
                         ((and (>= (length line) 9)
                               (char= (char line 3) #\Space)
                               (char= (char line 6) #\:))
@@ -111,6 +130,7 @@
                              (send-alert task-msg))))
 
                         ;; 2) HH:MM message (daily)
+                        ;; Example: "09:30 Drink water"
                         ((and (>= (length line) 5)
                               (char= (char line 2) #\:))
                          (let* ((task-time (subseq line 0 5))
@@ -126,14 +146,29 @@
           (format t "~%[Error] File not found: ~a~%" *todo-path*)))))
 
 
+;; ------------------------------------------------------------
+;; MAIN LOOP
+;; Align checks to minute boundaries.
+;; ------------------------------------------------------------
+
+(defun seconds-until-next-minute ()
+  (multiple-value-bind (s m h d mo y dow) (get-decoded-time)
+    (declare (ignore m h d mo y dow))
+    (let ((remaining (- 60 s)))
+      (if (= remaining 60) 0 remaining))))
+
 (defun main ()
   (format t "Scheduler Started (DOW aware). (Ctrl+C to stop)~%")
   (format t "Todo file: ~a~%" *todo-path*)
   (format t "Snooze script: ~a~%" *snooze-script*)
   (force-output)
+
+  ;; Optional: do one immediate check
+  (check-tasks)
+
   (loop
-    (check-tasks)
-    ;; Polling faster reduces the chance of missing the exact minute
-    (sleep 20)))
+    ;; Sleep until the next minute boundary
+    (sleep (seconds-until-next-minute))
+    (check-tasks)))
 
 (main)
